@@ -1,193 +1,136 @@
-import json
-import os
-import signal
 import streamlit as st
 import subprocess
-import time
-from typing import Tuple
-from pathlib import Path
-import asyncio
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+import json
+import os
 
-
-# Constants
-SIMULATION_DELAY = 0.1
-PROGRESS_STEPS = 101
-UPDATE_INTERVAL = 10
 FILE_PATH = "/home/ec2-user/experiments/training_output/training_params_and_metrics_global0.jsonl"
 PYTHON_INTERPRETER = "/home/ec2-user/training/venv/bin/python3"
+FULL_TRAINING_CMD = """--nnodes=1 --node_rank=0 --nproc_per_node=4 --rdzv_id=123 --rdzv_endpoint=0.0.0.0:8888 /home/ec2-user/training/src/instructlab/training/main_ds.py --model_name_or_path=/home/ec2-user/.cache/huggingface/hub/models--ibm-granite--granite-3.0-8b-base/snapshots/23357b69523bd98523496a5aba1f48bdea04a137 --data_path=/home/ec2-user/data/data.jsonl --output_dir=/home/ec2-user/experiments/training_output --num_epochs=2 --effective_batch_size=128 --learning_rate=2e-05 --num_warmup_steps=25 --save_samples=0 --log_level=INFO --max_batch_len=1024 --seed=42 --chat-tmpl-path=/home/ec2-user/training/src/instructlab/training/chat_templates/ibm_generic_tmpl.py --checkpoint_at_epoch --distributed_training_framework=fsdp --cpu_offload_optimizer --cpu_offload_optimizer_ratio=1.0 --cpu_offload_optimizer_pin_memory --cpu_offload_params_fsdp --fsdp_sharding_strategy=SHARD_GRAD_OP"""
+TORCHRUN = "/home/ec2-user/training/venv/bin/torchrun"
+SCRIPT = "/home/ec2-user/training/super-cool-test-3.py"
 
 
-def initialize_session_state() -> None:
-    """Initialize the session state variables if they don't exist."""
-    if "training_started" not in st.session_state:
-        st.session_state.training_started = False
+def start_training_job():
+    # training_command = [PYTHON_INTERPRETER, SCRIPT]
+    training_command = [
+        TORCHRUN,
+        "--nnodes=1",
+        "--node_rank=0",
+        "--nproc_per_node=4",
+        "--rdzv_id=123",
+        "--rdzv_endpoint=0.0.0.0:8888",
+        "/home/ec2-user/training/src/instructlab/training/main_ds.py",
+        "--model_name_or_path=/home/ec2-user/.cache/huggingface/hub/models--ibm-granite--granite-3.0-8b-base/snapshots/23357b69523bd98523496a5aba1f48bdea04a137",
+        "--data_path=/home/ec2-user/data/data.jsonl",
+        "--output_dir=/home/ec2-user/experiments/training_output",
+        "--num_epochs=1",
+        "--effective_batch_size=128",
+        "--learning_rate=2e-05",
+        "--num_warmup_steps=25",
+        "--save_samples=0",
+        "--log_level=INFO",
+        "--max_batch_len=1024",
+        "--seed=42",
+        "--chat-tmpl-path=/home/ec2-user/training/src/instructlab/training/chat_templates/ibm_generic_tmpl.py",
+        "--checkpoint_at_epoch",
+        "--distributed_training_framework=fsdp",
+        "--cpu_offload_optimizer",
+        "--cpu_offload_optimizer_ratio=1.0",
+        "--cpu_offload_optimizer_pin_memory",
+        "--cpu_offload_params_fsdp",
+        "--fsdp_sharding_strategy=SHARD_GRAD_OP",
+    ]
+    # process = subprocess.Popen(training_command)
 
-    if "file_content" not in st.session_state:
-        st.session_state.file_content = ""
+    # Open files to capture stdout and stderr
+    stdout_file = open("training_stdout.log", "w")
+    stderr_file = open("training_stderr.log", "w")
 
-    if "last_modified" not in st.session_state:
-        st.session_state.last_modified = 0
-
-    if "file_path" not in st.session_state:
-        st.session_state.file_path = FILE_PATH
-
-
-def update_file_content() -> None:
-    """Read and update the file content in session state."""
-    try:
-        with open(st.session_state.file_path, "r") as file:
-            st.session_state.file_content = file.read()
-            st.session_state.last_modified = time.time()
-    except Exception as e:
-        st.error(f"Error reading file: {str(e)}")
-
-
-def setup_file_monitoring() -> None:
-    """Set up the file system observer for monitoring changes."""
-    file_path = Path(st.session_state.file_path)
-    observer = Observer()
-    observer.schedule(FileChangeHandler(), str(file_path.parent), recursive=False)
-    observer.start()
-    st.session_state.observer = observer
-
-
-class FileChangeHandler(FileSystemEventHandler):
-    """Handle file system events for the monitored file."""
-
-    def on_modified(self, event: FileModifiedEvent):
-        if event.src_path == str(Path(st.session_state.file_path).resolve()):
-            update_file_content()
-
-
-def create_page_layout() -> Tuple[st.container, st.container]:
-    """Create and return the main page layout components."""
-    st.title("Fake Training Progress Demo")
-
-    # Display file content in a scrollable text area
-    st.text_area(
-        "File Content", value=st.session_state.file_content, height=400, disabled=True
+    # Start the training job and capture stdout and stderr
+    process = subprocess.Popen(
+        training_command,
+        stdout=stdout_file,
+        stderr=stderr_file,
+        text=True,  # Ensure text mode for strings
     )
-    # Show last update time
-    if st.session_state.last_modified:
-        st.text(
-            f"Last updated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.session_state.last_modified))}"
-        )
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    return progress_bar, status_text
+    st.session_state.training_process = process
 
 
-def start_training():
-    proc = subprocess.Popen(
-        [PYTHON_INTERPRETER, "/home/ec2-user/training/super-cool-test-3.py"],
+def get_training_progress():
+    # log_file_path = "/path/to/your/checkpoints_dir/training_log.jsonl"
+
+    if not os.path.exists(FILE_PATH):
+        return 0.0
+
+    with open(FILE_PATH, "r") as f:
+        lines = f.read().splitlines()
+
+    if len(lines) < 2:
+        return 0.0
+
+    print(f"lines length: {len(lines)}")
+    first_log, last_log = lines[0], lines[-1]
+    first_log, last_log = json.loads(first_log), json.loads(last_log)
+
+    # make sure that `last_log` actually contains the data we need to begin computing progress:
+    required_keys = ["epoch", "total_samples", "samples_seen"]
+    if not all(key in last_log for key in required_keys):
+        print("the last log doesn't yet contain the keys we require")
+        return 0.0
+
+    # Here we compute the total progress. The data to compute the progress is fragmented,
+    # so here are the details:
+    # 1. We get the total number of epochs we will iterate through from the first log output (when we log script args)
+    #       - `num_epochs`: This is a 1-indexed value representing the number of times we'll iterate through the dataset
+    # 2. Get the information about state of training from the last log output (will be the most recent in the running log output)
+    #    From here we get:
+    #       - `samples_seen`: Total number of samples seen thus far
+    #       - `epoch`: The current epoch, as a 0-indexed value
+    #       - `total_samples`: Total number of samples in the overall dataset
+    # 3. Our progress therefore is: % done = (completed_epochs * total_samples + samples_seen % total_samples) / (total_epochs * total_samples)
+    #
+    # IMPORTANT: The `num_epochs` value is 1-indexed, while `epoch` is 0-INDEXED. So `epoch == 0` means we are on epoch 1.
+    num_epochs = first_log["script_params"]["num_epochs"]
+    current_epoch = last_log["epoch"]
+    total_samples = last_log["total_samples"]
+    samples_seen = last_log["samples_seen"]
+    progress = (current_epoch * total_samples + samples_seen % total_samples) / (
+        num_epochs * total_samples
     )
-    st.session_state.file_content = ""
-    st.session_state.training_started = True
-    st.session_state.training_pid = proc.pid
-    st.session_state.training_proc = proc
-
-    # # Start file monitoring if not already started
-    if "observer" not in st.session_state:
-        setup_file_monitoring()
+    print(f"{progress=}")
+    return min(progress, 1.0)
 
 
-def stop_training():
-    if not st.session_state.training_started:
-        # if stop_training was called then this should not be the case
-        # but we will continue anyway because the other things are worth checking regardless
-        print("stop_training was called but training_started is false :/")
-
-    try:
-        os.kill(st.session_state.training_pid, signal.SIGTERM)
-        print(f"Process {st.session_state.training_pid} has been terminated")
-    except ProcessLookupError:
-        print(f"No process with {st.session_state.training_pid} found")
-    except Exception as e:
-        print(f"Error terminating process {st.session_state.training_pid}: {str(e)}")
-    finally:
-        st.session_state.training_pid = None
-        st.session_state.training_proc = None
-        st.session_state.file_content = ""
-        st.session_state.training_started = False
-
-
-def handle_user_controls() -> None:
-    """Handle user interface controls and their interactions."""
-    col1 = st.columns(1)[0]
-    with col1:
-        if st.button("Start Training"):
-            start_training()
-
-        if st.button("Reset"):
-            stop_training()
-            st.rerun()
-
-
-def observe_training_progress(
-    progress_bar: st.container, status_text: st.container
-) -> None:
-    """
-    Simulate a training process with progress updates.
-
-    Args:
-        progress_bar: Streamlit progress bar component
-        status_text: Streamlit text component for status updates
-    """
-    try:
-        while st.session_state.training_started:
-            update_file_content()
-
-            # read the last piece of the log output & parse as json
-            lines = st.session_state.file_content.splitlines()
-            first_log, last_log = lines[0], lines[-1]
-            first_log, last_log = first_log, json.loads(last_log)
-
-            # Here we compute the total progress. The data to compute the progress is fragmented,
-            # so here are the details:
-            # 1. We get the total number of epochs we will iterate through from the first log output (when we log script args)
-            #       - `num_epochs`: This is a 1-indexed value representing the number of times we'll iterate through the dataset
-            # 2. Get the information about state of training from the last log output (will be the most recent in the running log output)
-            #    From here we get:
-            #       - `samples_seen`: Total number of samples seen thus far
-            #       - `epoch`: The current epoch, as a 0-indexed value
-            #       - `total_samples`: Total number of samples in the overall dataset
-            # 3. Our progress therefore is: % done = (completed_epochs * total_samples + samples_seen % total_samples) / (total_epochs * total_samples)
-            #
-            # IMPORTANT: The `num_epochs` value is 1-indexed, while `epoch` is 0-INDEXED. So `epoch == 0` means we are on epoch 1.
-            num_epochs = first_log["script_args"]["num_epochs"]
-            print(f"{num_epochs=}")
-            current_epoch = last_log["epoch"] + 1
-            print(f"{current_epoch=}")
-            total_samples = last_log["total_samples"]
-            print(f"{total_samples=}")
-            samples_seen = last_log["samples_seen"]
-            print(f"{samples_seen=}")
-            progress = (
-                current_epoch * total_samples + samples_seen % total_samples
-            ) / (num_epochs * total_samples)
-
-            progress_bar.progress(progress * 100)
-            time.sleep(1)
-
-        if st.session_state.training_started:
-            st.success("Training completed!")
-
-    except Exception as e:
-        st.error(f"An error occurred during training: {str(e)}")
-
-
+@st.experimental_fragment(run_every=1)
 def main():
-    """Main application entry point."""
-    initialize_session_state()
-    progress_bar, status_text = create_page_layout()
-    handle_user_controls()
+    st.title("Training Monitor")
 
-    if st.session_state.training_started:
-        observe_training_progress(progress_bar, status_text)
-    st.rerun()
+    if "training_in_progress" not in st.session_state:
+        st.session_state.training_in_progress = False
+
+    training_btn_label = (
+        "Stop Training" if st.session_state.training_in_progress else "Start Training"
+    )
+    if st.button(training_btn_label, key="toggle-training"):
+        if not st.session_state.training_in_progress:
+            start_training_job()
+            st.session_state.training_in_progress = True
+        else:
+            st.warning("Training is already in progress.")
+
+    if st.session_state.training_in_progress:
+        progress = get_training_progress()
+        print(f"training progress: {progress:.4f}")
+        progress_bar = st.progress(progress)
+        st.text(f"Training Progress: {progress * 100:.2f}%")
+
+        # Check if the process has terminated
+        if st.session_state.training_process.poll() is not None:
+            st.success("Training Complete!")
+            st.session_state.training_in_progress = False
+            st.session_state.training_process = None
+    else:
+        st.info("Click 'Start Training' to begin.")
 
 
 if __name__ == "__main__":
